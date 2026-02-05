@@ -1,0 +1,116 @@
+{
+  "name": "WhatsApp Lounge Agent - Monthly Guest Reset",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 0 1 * *"
+            }
+          ]
+        }
+      },
+      "id": "schedule-monthly-reset",
+      "name": "Schedule: 1st of Month",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "notes": "Runs at midnight on the 1st of each month"
+    },
+    {
+      "parameters": {
+        "operation": "list",
+        "application": "YOUR_BASE_ID",
+        "table": "Members",
+        "options": {
+          "filterByFormula": "{MembershipStatus} = 'Active'"
+        }
+      },
+      "id": "airtable-get-active-members",
+      "name": "Airtable: Get Active Members",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 1,
+      "position": [460, 300],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "your-airtable-credential-id",
+          "name": "Airtable Personal Access Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Get today's date for reset\nconst today = new Date().toISOString().split('T')[0];\n\n// Process all active members\nconst members = $input.all();\n\nconst updates = members.map(member => {\n  return {\n    id: member.json.id,\n    fields: {\n      MonthlyGuestCount: 0,\n      LastResetDate: today\n    }\n  };\n});\n\nreturn updates.map(update => ({ json: update }));"
+      },
+      "id": "prepare-reset-data",
+      "name": "Prepare Reset Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "application": "YOUR_BASE_ID",
+        "table": "Members",
+        "id": "={{$json.id}}",
+        "fields": {
+          "values": [
+            {
+              "fieldId": "MonthlyGuestCount",
+              "fieldValue": "0"
+            },
+            {
+              "fieldId": "LastResetDate",
+              "fieldValue": "={{$json.fields.LastResetDate}}"
+            }
+          ]
+        }
+      },
+      "id": "airtable-reset-guest-count",
+      "name": "Airtable: Reset Guest Count",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 1,
+      "position": [900, 300],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "your-airtable-credential-id"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Count how many members were reset\nconst resetCount = $input.all().length;\n\nconst month = new Date().toLocaleString('default', { month: 'long' });\nconst year = new Date().getFullYear();\n\nreturn {\n  resetCount: resetCount,\n  month: month,\n  year: year,\n  message: `✅ Monthly guest count reset completed for ${month} ${year}. Reset ${resetCount} active members.`\n};"
+      },
+      "id": "summary-message",
+      "name": "Create Summary",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1120, 300]
+    }
+  ],
+  "connections": {
+    "Schedule: 1st of Month": {
+      "main": [[{ "node": "Airtable: Get Active Members", "type": "main", "index": 0 }]]
+    },
+    "Airtable: Get Active Members": {
+      "main": [[{ "node": "Prepare Reset Data", "type": "main", "index": 0 }]]
+    },
+    "Prepare Reset Data": {
+      "main": [[{ "node": "Airtable: Reset Guest Count", "type": "main", "index": 0 }]]
+    },
+    "Airtable: Reset Guest Count": {
+      "main": [[{ "node": "Create Summary", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2025-01-28T00:00:00.000Z",
+  "versionId": "1"
+}

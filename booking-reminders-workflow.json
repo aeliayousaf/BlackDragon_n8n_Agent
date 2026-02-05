@@ -1,0 +1,382 @@
+{
+  "name": "WhatsApp Lounge Agent - Booking Reminders (1 hour)",
+  "nodes": [
+    {
+      "parameters": {
+        "timezone": "America/Toronto",
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "f5d7f6ae-3f30-4a5f-9b82-1b8851d8e7c1",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        360,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "airtableTokenApi",
+        "operation": "list",
+        "application": {
+          "__rl": true,
+          "value": "app8NRdp0pEHfShoJ",
+          "mode": ""
+        },
+        "table": "Members",
+        "returnAll": true,
+        "additionalOptions": {
+          "filterByFormula": "AND(FIND(\"CONFIRMED|\", {PendingTime})=1, NOT(FIND(\"REM1H_SENT\", {PendingTime})))"
+        }
+      },
+      "id": "0a52f45a-3d10-4c6f-8e58-99f709c96c31",
+      "name": "Airtable: List Confirmed (No Reminder)",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 1,
+      "position": [
+        600,
+        300
+      ],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "aGJEUsnx6WBz4t50",
+          "name": "Lounge Airtable"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Build 1-hour reminder candidates\n// This workflow relies on PendingTime format:\n//   CONFIRMED|YYYY-MM-DD|<timeReference>\n// After a reminder is sent, we append:\n//   |REM1H_SENT|<ISO timestamp>\n// This avoids needing any Airtable schema changes.\n\nconst items = $input.all();\nconst now = new Date();\n\nfunction normalizeToE164(raw) {\n  const s = String(raw || '').trim();\n  if (!s) return '';\n\n  // Remove whatsapp: prefix if present\n  const noPrefix = s.startsWith('whatsapp:') ? s.slice('whatsapp:'.length) : s;\n\n  // Keep digits and + only\n  const plus = noPrefix.trim().startsWith('+');\n  const digits = noPrefix.replace(/[^0-9]/g, '');\n\n  if (!digits) return '';\n\n  // If already had + and length looks valid, keep it\n  if (plus && digits.length >= 10) return '+' + digits;\n\n  // If 11 digits and starts with 1, assume NANP\n  if (digits.length === 11 && digits.startsWith('1')) return '+' + digits;\n\n  // If 10 digits, assume NANP country code 1\n  if (digits.length === 10) return '+1' + digits;\n\n  // Fallback\n  return '+' + digits;\n}\n\nfunction getFirstName(fields) {\n  const candidates = [\n    fields?.FirstName,\n    fields?.MemberFirstName,\n    fields?.ContactFirstName,\n  ].filter(Boolean);\n  if (candidates.length) return String(candidates[0]).trim();\n\n  const full = String(fields?.FullName || fields?.Name || fields?.MemberName || fields?.Member || fields?.ContactName || '').trim();\n  if (!full) return 'there';\n  return full.split(/\\s+/)[0] || 'there';\n}\n\nfunction parseTimeToHoursMinutes(timeRef) {\n  const s = String(timeRef || '').toLowerCase();\n\n  // 7pm / 7 pm / 7:00 pm\n  const m12 = s.match(/\\b(\\d{1,2})(?::(\\d{2}))?\\s*(am|pm)\\b/);\n  if (m12) {\n    let h = parseInt(m12[1], 10);\n    const min = m12[2] ? parseInt(m12[2], 10) : 0;\n    const ap = m12[3];\n    if (ap === 'pm' && h !== 12) h += 12;\n    if (ap === 'am' && h === 12) h = 0;\n    return { h, min };\n  }\n\n  // 19:00\n  const m24 = s.match(/\\b(\\d{1,2}):(\\d{2})\\b/);\n  if (m24) {\n    const h = parseInt(m24[1], 10);\n    const min = parseInt(m24[2], 10);\n    if (!Number.isNaN(h) && !Number.isNaN(min)) return { h, min };\n  }\n\n  return null;\n}\n\nconst out = [];\n\nfor (const item of items) {\n  const rec = item.json || {};\n  const id = rec.id;\n  const fields = rec.fields || {};\n\n  const pendingTime = String(fields.PendingTime || '').trim();\n  if (!pendingTime.startsWith('CONFIRMED|')) continue;\n  if (pendingTime.includes('REM1H_SENT')) continue;\n\n  const parts = pendingTime.split('|');\n  const dateStr = (parts[1] || '').trim();\n  const timeRef = (parts[2] || '').trim();\n\n  // We can only remind if we can parse a concrete time.\n  const tm = parseTimeToHoursMinutes(timeRef);\n  if (!dateStr || !tm) continue;\n\n  const bookingDateTime = new Date(`${dateStr}T${String(tm.h).padStart(2, '0')}:${String(tm.min).padStart(2, '0')}:00`);\n  if (Number.isNaN(bookingDateTime.getTime())) continue;\n\n  const diffMinutes = (bookingDateTime.getTime() - now.getTime()) / 60000;\n\n  // Only trigger once when we are about ~1 hour out\n  if (diffMinutes < 55 || diffMinutes > 65) continue;\n\n  const toE164 = normalizeToE164(fields.PhoneNumber || fields.Phone || fields.Mobile || fields.MobilePhone || '');\n  if (!toE164) continue;\n\n  const firstName = getFirstName(fields);\n  const guests = fields.PendingGuests;\n  const guestsStr = (guests !== null && guests !== undefined && guests !== '') ? String(guests) : '';\n\n  // Keep the original 3-part booking key so we can compare in the future if needed.\n  const bookingKey = ['CONFIRMED', dateStr, timeRef].join('|');\n  const updatedPendingTime = pendingTime + `|REM1H_SENT|${new Date().toISOString()}`;\n\n  let msg = `Hi ${firstName} — quick reminder that your booking is in about 1 hour`;\n  msg += timeRef ? ` (${timeRef})` : '';\n  msg += '.';\n  if (guestsStr) msg += `\\n\\nGuests: ${guestsStr}`;\n  msg += `\\n\\nReply here if you need to adjust your guests.`;\n\n  out.push({\n    json: {\n      memberId: id,\n      bookingKey,\n      originalPendingTime: pendingTime,\n      updatedPendingTime,\n      toE164,\n      reminderMessage: msg,\n    },\n  });\n}\n\nreturn out;\n"
+      },
+      "id": "cfaab2d0-1468-4aa0-aed0-4e1b7f5f3fd8",
+      "name": "Compute Reminder Candidates",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        860,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.toE164 !== undefined && $json.toE164 !== ''}}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "8bdfba26-e88f-4c73-95c5-5f0f6c5c6404",
+      "name": "Has Reminders?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1110,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "from": "whatsapp:+14155238886",
+        "to": "={{'whatsapp:' + $json.toE164}}",
+        "message": "={{$json.reminderMessage}}",
+        "options": {}
+      },
+      "id": "5e7a7b47-f7cd-4fe4-a3c3-0197fd56e0b5",
+      "name": "Twilio: Send Member Reminder (WhatsApp)",
+      "type": "n8n-nodes-base.twilio",
+      "typeVersion": 1,
+      "position": [
+        1350,
+        220
+      ],
+      "credentials": {
+        "twilioApi": {
+          "id": "pjAFO4uh7n4T1yi5",
+          "name": "WhatsAPP Twilio"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "base": {
+          "__rl": true,
+          "value": "app8NRdp0pEHfShoJ",
+          "mode": "id"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblrq2UqWNtuZfi4j",
+          "mode": "list",
+          "cachedResultName": "Members",
+          "cachedResultUrl": "https://airtable.com/app8NRdp0pEHfShoJ/tblrq2UqWNtuZfi4j"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "id": "={{$json.memberId}}",
+            "PendingTime": "={{$json.updatedPendingTime}}"
+          },
+          "matchingColumns": [
+            "id"
+          ]
+        },
+        "options": {
+          "typecast": true
+        }
+      },
+      "id": "a4441edc-8a6c-4c55-88b9-9e427b0f89be",
+      "name": "Airtable: Mark Reminder Sent",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        1600,
+        220
+      ],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "aGJEUsnx6WBz4t50",
+          "name": "Lounge Airtable"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "airtableTokenApi",
+        "operation": "list",
+        "application": {
+          "__rl": true,
+          "value": "app8NRdp0pEHfShoJ",
+          "mode": ""
+        },
+        "table": "Members",
+        "returnAll": true,
+        "additionalOptions": {
+          "filterByFormula": "AND({MembershipStatus}='Active', {MembershipEndDate}!='', IS_BEFORE({MembershipEndDate}, DATEADD(TODAY(), 3, 'days')))"
+        }
+      },
+      "id": "d8b7f4c3-56a1-4bbf-9bd4-0c6cf03d7b89",
+      "name": "Airtable: List Expiring Memberships",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 1,
+      "position": [
+        600,
+        520
+      ],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "aGJEUsnx6WBz4t50",
+          "name": "Lounge Airtable"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Build membership-expiry reminders for members + admins.\n// Sends at:\n// - 3 days before expiry\n// - 1 day before expiry (final reminder)\n//\n// Uses workflow static data to de-duplicate so the 5-min schedule doesn't spam.\n\nconst items = $input.all();\n\n// Admin numbers (WhatsApp)\nconst adminNumbers = [\n  '+16472032776',\n  '+16478782776',\n  '+10000000003',\n];\n\nfunction normalizeToE164(raw) {\n  const s = String(raw || '').trim();\n  if (!s) return '';\n\n  const noPrefix = s.startsWith('whatsapp:') ? s.slice('whatsapp:'.length) : s;\n  const plus = noPrefix.trim().startsWith('+');\n  const digits = noPrefix.replace(/[^0-9]/g, '');\n  if (!digits) return '';\n\n  if (plus && digits.length >= 10) return '+' + digits;\n  if (digits.length === 11 && digits.startsWith('1')) return '+' + digits;\n  if (digits.length === 10) return '+1' + digits;\n  return '+' + digits;\n}\n\nfunction pickFullName(fields) {\n  const full = String(fields?.FullName || fields?.Name || fields?.MemberName || fields?.Member || fields?.ContactName || '').trim();\n  return full || 'Member';\n}\n\nfunction pickFirstName(fields) {\n  const candidates = [fields?.FirstName, fields?.MemberFirstName, fields?.ContactFirstName].filter(Boolean);\n  if (candidates.length) return String(candidates[0]).trim();\n  const full = pickFullName(fields);\n  const first = full.split(/\\s+/)[0];\n  return first || 'there';\n}\n\nfunction formatDateLong(dateStr) {\n  // Airtable often returns YYYY-MM-DD\n  const s = String(dateStr || '').trim();\n  if (!s) return '';\n  // Treat as local date to avoid timezone shifts\n  const d = new Date(`${s}T00:00:00`);\n  if (Number.isNaN(d.getTime())) return s;\n  return d.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });\n}\n\nfunction daysUntil(dateStr) {\n  const s = String(dateStr || '').trim();\n  if (!s) return null;\n  const today = new Date();\n  today.setHours(0, 0, 0, 0);\n  const end = new Date(`${s}T00:00:00`);\n  if (Number.isNaN(end.getTime())) return null;\n  end.setHours(0, 0, 0, 0);\n  return Math.round((end.getTime() - today.getTime()) / 86400000);\n}\n\n// Static data for dedupe\nlet staticData;\ntry {\n  // eslint-disable-next-line no-invalid-this\n  staticData = this.getWorkflowStaticData('global');\n} catch (e) {\n  staticData = {};\n}\nstaticData.expiryRemindersSent = staticData.expiryRemindersSent || {};\n\nconst now = new Date();\nconst NOW_ISO = now.toISOString();\nconst RESEND_COOLDOWN_HOURS = 36; // safety window\n\nfunction alreadySent(key) {\n  const val = staticData.expiryRemindersSent[key];\n  if (!val) return false;\n  const last = new Date(String(val));\n  if (Number.isNaN(last.getTime())) return true;\n  const ageHrs = (now.getTime() - last.getTime()) / 3600000;\n  return ageHrs < RESEND_COOLDOWN_HOURS;\n}\n\nfunction markSent(key) {\n  staticData.expiryRemindersSent[key] = NOW_ISO;\n}\n\nconst out = [];\n\nfor (const item of items) {\n  const rec = item.json || {};\n  const memberId = rec.id;\n  const fields = rec.fields || {};\n\n  const endDateStr = String(fields.MembershipEndDate || '').trim();\n  if (!memberId || !endDateStr) continue;\n\n  const d = daysUntil(endDateStr);\n  if (d === null) continue;\n\n  // Only send at 3 days and 1 day\n  const reminderType = (d === 3) ? 'EXP_3D' : ((d === 1) ? 'EXP_1D' : null);\n  if (!reminderType) continue;\n\n  const key = `${memberId}|${reminderType}|${endDateStr}`;\n  if (alreadySent(key)) continue;\n\n  const memberPhone = normalizeToE164(fields.PhoneNumber || fields.Phone || fields.Mobile || fields.MobilePhone || '');\n  if (!memberPhone) continue;\n\n  const fullName = pickFullName(fields);\n  const firstName = pickFirstName(fields);\n  const prettyEnd = formatDateLong(endDateStr);\n\n  // Member message\n  let memberMsg = `Hi ${firstName} — quick heads up that your membership expires in ${d} day${d === 1 ? '' : 's'} (${prettyEnd}).`;\n  if (d === 1) {\n    memberMsg += `\\n\\nThis is your final reminder.`;\n  }\n  memberMsg += `\\n\\nReply RENEW to renew your membership.`;\n\n  // Admin message\n  const adminMsg = `[Black Dragon Lounge] Membership expiring ${d === 1 ? 'tomorrow' : 'soon'} (${d} day${d === 1 ? '' : 's'})\\nMember: ${fullName} (${memberPhone})\\nExpiry: ${prettyEnd}`;\n\n  // Mark sent BEFORE sending to prevent spam if workflow runs again within minutes.\n  markSent(key);\n\n  out.push({\n    json: {\n      kind: 'member',\n      reminderType,\n      daysUntilExpiry: d,\n      memberId,\n      memberFullName: fullName,\n      memberPhone,\n      message: memberMsg,\n    },\n  });\n\n  for (const n of adminNumbers) {\n    const adminTo = normalizeToE164(n);\n    if (!adminTo) continue;\n    out.push({\n      json: {\n        kind: 'admin',\n        reminderType,\n        daysUntilExpiry: d,\n        memberId,\n        memberFullName: fullName,\n        memberPhone,\n        toE164: adminTo,\n        message: adminMsg,\n      },\n    });\n  }\n}\n\nreturn out;\n"
+      },
+      "id": "c2a2a4c8-4b1f-49f1-8e3a-278f9c6d5a9e",
+      "name": "Compute Expiry Reminders",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        860,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.kind}}",
+              "value2": "member"
+            }
+          ]
+        }
+      },
+      "id": "5a3b0c7b-8a4f-4e9f-9c2f-0b3b6e12d8b1",
+      "name": "Is Member Expiry Reminder?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1110,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "from": "whatsapp:+14155238886",
+        "to": "={{'whatsapp:' + $json.memberPhone}}",
+        "message": "={{$json.message}}",
+        "options": {}
+      },
+      "id": "9f20b1f3-3d0c-4b2a-b3b2-4db7b87cc2b2",
+      "name": "Twilio: Send Member Expiry Reminder (WhatsApp)",
+      "type": "n8n-nodes-base.twilio",
+      "typeVersion": 1,
+      "continueOnFail": true,
+      "position": [
+        1350,
+        460
+      ],
+      "credentials": {
+        "twilioApi": {
+          "id": "pjAFO4uh7n4T1yi5",
+          "name": "WhatsAPP Twilio"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "from": "whatsapp:+14155238886",
+        "to": "={{'whatsapp:' + $json.toE164}}",
+        "message": "={{$json.message}}",
+        "options": {}
+      },
+      "id": "0d7b6b52-fc43-4b5e-8d0a-5f5c6de86c4a",
+      "name": "Twilio: Send Admin Expiry Alert (WhatsApp)",
+      "type": "n8n-nodes-base.twilio",
+      "typeVersion": 1,
+      "continueOnFail": true,
+      "position": [
+        1350,
+        600
+      ],
+      "credentials": {
+        "twilioApi": {
+          "id": "pjAFO4uh7n4T1yi5",
+          "name": "WhatsAPP Twilio"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Airtable: List Confirmed (No Reminder)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Airtable: List Expiring Memberships",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Airtable: List Confirmed (No Reminder)": {
+      "main": [
+        [
+          {
+            "node": "Compute Reminder Candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute Reminder Candidates": {
+      "main": [
+        [
+          {
+            "node": "Has Reminders?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Reminders?": {
+      "main": [
+        [
+          {
+            "node": "Twilio: Send Member Reminder (WhatsApp)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Twilio: Send Member Reminder (WhatsApp)": {
+      "main": [
+        [
+          {
+            "node": "Airtable: Mark Reminder Sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Airtable: List Expiring Memberships": {
+      "main": [
+        [
+          {
+            "node": "Compute Expiry Reminders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute Expiry Reminders": {
+      "main": [
+        [
+          {
+            "node": "Is Member Expiry Reminder?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Member Expiry Reminder?": {
+      "main": [
+        [
+          {
+            "node": "Twilio: Send Member Expiry Reminder (WhatsApp)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Twilio: Send Admin Expiry Alert (WhatsApp)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Toronto",
+    "availableInMCP": false
+  },
+  "versionId": "a8e9c2f0-2dfe-4b54-8c7c-5c7f8b9b7bb8",
+  "meta": {
+    "instanceId": "ff9144574abd4060eb276caf6fde5475cd7b8818811aedc6829939465ad929a2"
+  },
+  "id": "booking-reminders-1h",
+  "tags": []
+}
+

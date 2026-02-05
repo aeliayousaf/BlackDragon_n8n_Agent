@@ -1,0 +1,242 @@
+{
+  "name": "WhatsApp Lounge Agent - Membership Renewal Reminders",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 10 * * *"
+            }
+          ]
+        }
+      },
+      "id": "schedule-daily-check",
+      "name": "Schedule: Daily 10 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "notes": "Runs daily at 10 AM to check for expiring memberships"
+    },
+    {
+      "parameters": {
+        "operation": "list",
+        "application": "YOUR_BASE_ID",
+        "table": "Members",
+        "options": {
+          "filterByFormula": "AND({MembershipStatus} = 'Active', {MembershipEndDate} != '')"
+        }
+      },
+      "id": "airtable-get-active-members",
+      "name": "Airtable: Get Active Members",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 1,
+      "position": [460, 300],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "your-airtable-credential-id",
+          "name": "Airtable Personal Access Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Process each member and determine if reminder needed\nconst members = $input.all();\nconst today = new Date();\ntoday.setHours(0, 0, 0, 0);\n\nconst membersNeedingReminder = [];\n\nfor (const member of members) {\n  const fields = member.json.fields;\n  const endDate = new Date(fields.MembershipEndDate);\n  endDate.setHours(0, 0, 0, 0);\n  \n  // Calculate days until expiry\n  const timeDiff = endDate.getTime() - today.getTime();\n  const daysUntilExpiry = Math.ceil(timeDiff / (1000 * 60 * 60 * 24));\n  \n  // Determine which reminder to send\n  let reminderType = null;\n  const lastReminder = fields.RenewalReminderSent || 'None';\n  \n  if (daysUntilExpiry === 7 && lastReminder === 'None') {\n    reminderType = '7-Day';\n  } else if (daysUntilExpiry === 3 && (lastReminder === 'None' || lastReminder === '7-Day')) {\n    reminderType = '3-Day';\n  } else if (daysUntilExpiry === 1 && lastReminder !== '1-Day' && lastReminder !== 'Expired') {\n    reminderType = '1-Day';\n  } else if (daysUntilExpiry <= 0 && lastReminder !== 'Expired') {\n    reminderType = 'Expired';\n  }\n  \n  if (reminderType) {\n    // Calculate renewal pricing\n    const membershipType = fields.MembershipType || 'Monthly';\n    let basePrice, taxAmount, totalPrice;\n    \n    if (membershipType === '3-Month') {\n      basePrice = 1250;\n      taxAmount = 162.50;\n      totalPrice = 1412.50;\n    } else {\n      basePrice = 350;\n      taxAmount = 45.50;\n      totalPrice = 395.50;\n    }\n    \n    membersNeedingReminder.push({\n      memberId: member.json.id,\n      memberName: fields.FullName,\n      phoneNumber: fields.PhoneNumber,\n      email: fields.Email,\n      membershipType: membershipType,\n      endDate: fields.MembershipEndDate,\n      daysUntilExpiry: daysUntilExpiry,\n      reminderType: reminderType,\n      basePrice: basePrice,\n      taxAmount: taxAmount,\n      totalPrice: totalPrice,\n      autoRenew: fields.AutoRenew || false\n    });\n  }\n}\n\nreturn membersNeedingReminder.map(m => ({ json: m }));"
+      },
+      "id": "check-expiring-memberships",
+      "name": "Check Expiring Memberships",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{$input.all().length}}",
+              "operation": "larger",
+              "value2": 0
+            }
+          ]
+        }
+      },
+      "id": "has-reminders-to-send",
+      "name": "Any Reminders?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Generate the appropriate reminder message\nconst member = $json;\n\nlet message = '';\nconst formattedDate = new Date(member.endDate).toLocaleDateString('en-US', { \n  weekday: 'long', \n  year: 'numeric', \n  month: 'long', \n  day: 'numeric' \n});\n\nswitch (member.reminderType) {\n  case '7-Day':\n    message = `Hi ${member.memberName}! 👋\\n\\n`;\n    message += `Your ${member.membershipType} membership expires on *${formattedDate}* (7 days).\\n\\n`;\n    message += `💰 Renewal: $${member.totalPrice.toFixed(2)} (includes 13% tax)\\n\\n`;\n    message += `Reply *RENEW* to continue your membership\\n`;\n    message += `Reply *CANCEL* if you'd like to end your membership\\n\\n`;\n    message += `Questions? Just message us! 🥂`;\n    break;\n    \n  case '3-Day':\n    message = `Hi ${member.memberName}! ⏰\\n\\n`;\n    message += `Reminder: Your membership expires in *3 days* (${formattedDate}).\\n\\n`;\n    message += `Don't lose access to your exclusive member benefits!\\n\\n`;\n    message += `💰 Renewal: $${member.totalPrice.toFixed(2)}\\n\\n`;\n    message += `Reply *RENEW* to stay active\\n`;\n    message += `Reply *CANCEL* to end membership`;\n    break;\n    \n  case '1-Day':\n    message = `🚨 *Last Chance* ${member.memberName}!\\n\\n`;\n    message += `Your membership expires *TOMORROW* (${formattedDate}).\\n\\n`;\n    message += `Reply *RENEW* now to avoid interruption\\n\\n`;\n    message += `💰 $${member.totalPrice.toFixed(2)} for ${member.membershipType}`;\n    break;\n    \n  case 'Expired':\n    message = `Hi ${member.memberName},\\n\\n`;\n    message += `Your membership has expired as of ${formattedDate}. 😢\\n\\n`;\n    message += `We'd love to have you back!\\n\\n`;\n    message += `💰 Rejoin Options:\\n`;\n    message += `• Monthly: $395.50/month\\n`;\n    message += `• 3-Month: $1,412.50 (save $226!)\\n\\n`;\n    message += `Reply *RENEW* anytime to reactivate\\n\\n`;\n    message += `We hope to see you again soon! 🥂`;\n    break;\n}\n\nreturn {\n  ...member,\n  message: message\n};"
+      },
+      "id": "generate-reminder-message",
+      "name": "Generate Reminder Message",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "from": "whatsapp:+YOUR_TWILIO_NUMBER",
+        "to": "=whatsapp:{{$json.phoneNumber}}",
+        "message": "={{$json.message}}",
+        "options": {}
+      },
+      "id": "whatsapp-send-reminder",
+      "name": "WhatsApp: Send Reminder",
+      "type": "n8n-nodes-base.twilio",
+      "typeVersion": 1,
+      "position": [1340, 300],
+      "credentials": {
+        "twilioApi": {
+          "id": "your-twilio-credential-id",
+          "name": "Twilio API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "application": "YOUR_BASE_ID",
+        "table": "Members",
+        "id": "={{$json.memberId}}",
+        "fields": {
+          "values": [
+            {
+              "fieldId": "RenewalReminderSent",
+              "fieldValue": "={{$json.reminderType}}"
+            },
+            {
+              "fieldId": "LastReminderDate",
+              "fieldValue": "={{new Date().toISOString().split('T')[0]}}"
+            }
+          ]
+        }
+      },
+      "id": "airtable-update-reminder-status",
+      "name": "Airtable: Update Reminder Status",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 1,
+      "position": [1560, 300],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "your-airtable-credential-id"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Handle expired memberships - update status\nconst member = $json;\n\nif (member.reminderType === 'Expired') {\n  return {\n    ...member,\n    needsStatusUpdate: true\n  };\n}\n\nreturn {\n  ...member,\n  needsStatusUpdate: false\n};"
+      },
+      "id": "check-if-expired",
+      "name": "Check If Expired",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1780, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.needsStatusUpdate}}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "needs-status-update",
+      "name": "Update Status?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [2000, 300]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "application": "YOUR_BASE_ID",
+        "table": "Members",
+        "id": "={{$json.memberId}}",
+        "fields": {
+          "values": [
+            {
+              "fieldId": "MembershipStatus",
+              "fieldValue": "Expired"
+            }
+          ]
+        }
+      },
+      "id": "airtable-set-expired",
+      "name": "Airtable: Set Status Expired",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 1,
+      "position": [2220, 200],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "your-airtable-credential-id"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Final summary\nconst allResults = $input.all();\n\nconst summary = {\n  totalReminders: allResults.length,\n  byType: {\n    '7-Day': allResults.filter(r => r.json.reminderType === '7-Day').length,\n    '3-Day': allResults.filter(r => r.json.reminderType === '3-Day').length,\n    '1-Day': allResults.filter(r => r.json.reminderType === '1-Day').length,\n    'Expired': allResults.filter(r => r.json.reminderType === 'Expired').length\n  },\n  timestamp: new Date().toISOString()\n};\n\nreturn { json: summary };"
+      },
+      "id": "create-summary",
+      "name": "Create Summary",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2440, 300]
+    }
+  ],
+  "connections": {
+    "Schedule: Daily 10 AM": {
+      "main": [[{ "node": "Airtable: Get Active Members", "type": "main", "index": 0 }]]
+    },
+    "Airtable: Get Active Members": {
+      "main": [[{ "node": "Check Expiring Memberships", "type": "main", "index": 0 }]]
+    },
+    "Check Expiring Memberships": {
+      "main": [[{ "node": "Any Reminders?", "type": "main", "index": 0 }]]
+    },
+    "Any Reminders?": {
+      "main": [
+        [],
+        [{ "node": "Generate Reminder Message", "type": "main", "index": 0 }]
+      ]
+    },
+    "Generate Reminder Message": {
+      "main": [[{ "node": "WhatsApp: Send Reminder", "type": "main", "index": 0 }]]
+    },
+    "WhatsApp: Send Reminder": {
+      "main": [[{ "node": "Airtable: Update Reminder Status", "type": "main", "index": 0 }]]
+    },
+    "Airtable: Update Reminder Status": {
+      "main": [[{ "node": "Check If Expired", "type": "main", "index": 0 }]]
+    },
+    "Check If Expired": {
+      "main": [[{ "node": "Update Status?", "type": "main", "index": 0 }]]
+    },
+    "Update Status?": {
+      "main": [
+        [{ "node": "Airtable: Set Status Expired", "type": "main", "index": 0 }],
+        [{ "node": "Create Summary", "type": "main", "index": 0 }]
+      ]
+    },
+    "Airtable: Set Status Expired": {
+      "main": [[{ "node": "Create Summary", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": ["membership", "reminders"],
+  "triggerCount": 1,
+  "updatedAt": "2025-01-28T00:00:00.000Z",
+  "versionId": "1"
+}

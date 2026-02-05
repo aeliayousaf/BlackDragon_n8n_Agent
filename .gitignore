@@ -1,0 +1,29 @@
+# Debug and temporary files
+DEBUG-*.md
+DEBUG-*.js
+FIX-*.md
+FIX-*.js
+fix-*.js
+*.txt
+*.py
+
+# Temporary workflow files
+main-workflow-fixed*.json
+WhatsApp Lounge Agent - Main Workflow.json
+
+# Claude directory
+.claude/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
